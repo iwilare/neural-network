@@ -57,23 +57,24 @@ public:
         for(size_t i = 0; i < outputs; i++)
             f >> bias[i];
     }
-    Layer(size_t inputs, size_t outputs, double minRand, double maxRand) {
+    Layer(size_t inputs, size_t outputs, double randomRange) {
         allocate(inputs, outputs);
 
-        random_device rd;
-        mt19937 gen(rd());
-        uniform_real_distribution<> dis(minRand, maxRand);
+        mt19937 mt = mt19937(random_device()());
+        uniform_real_distribution<> dis(-randomRange, +randomRange);
         for(size_t i = 0; i < outputs; i++)
             for(size_t j = 0; j < inputs; j++) {
-                weights[i][j] = dis(gen);
+                weights[i][j] = dis(mt);
             }
         for(size_t i = 0; i < outputs; i++)
-            bias[i] = dis(gen);
+            bias[i] = dis(mt);
         // Biases not initialized to zero
     }
     vector<double> const& currentOutput() const { return output; }
     size_t inputSize() const { return inputs; }
     size_t outputSize() const { return outputs; }
+    vector<double> const& getBias() const { return bias; }
+    vector<vector<double>> const& getWeights() const { return weights; }
     void initializeBatchAdjustement() {
         for(size_t i = 0; i < outputs; i++)
             fill(weightsAdj[i].begin(), weightsAdj[i].end(), 0.0);
@@ -116,26 +117,40 @@ public:
             biasAdj[i] += -1 * deltas[i];
         }
     }
-    void serialize(ostream& f) {
-        f << inputs << " " << outputs << endl;
-        for(auto const& r : weights) {
-            for(auto const& v : r)
-                f << v << " ";
-            f << endl;
+    void backpropagateInput(vector<double> const& input, Layer& nextLayer, double lam) {
+        for(size_t i = 0; i < outputs; i++) {
+            auto generalError = 0.0;
+            for(size_t k = 0; k < nextLayer.outputs; k++)
+                generalError += nextLayer.deltas[k] * nextLayer.weights[k][i];
+            deltas[i] = generalError * (1 - output[i] * output[i]);
+
+            for(size_t j = 0; j < inputs; j++)
+                weightsAdj[i][j] += -input[j] * deltas[i]; // Add normalization here
+            biasAdj[i] += -1 * deltas[i];
         }
-        for(auto const& b : bias)
-            f << b << " ";
-        f << endl;
     }
 };
+
+std::ostream& operator<<(std::ostream& o, Layer const& l) {
+    o << l.inputSize() << " " << l.outputSize() << endl;
+    for(auto const& r : l.getWeights()) {
+        for(auto const& v : r)
+            o << v << " ";
+        o << endl;
+    }
+    for(auto const& b : l.getBias())
+        o << b << " ";
+    o << endl;
+    return o;
+}
 
 class NeuralNetwork {
     vector<Layer> layers;
 public:
-    NeuralNetwork(vector<size_t> topology, double minRand, double maxRand) {
+    NeuralNetwork(vector<size_t> topology, double randomRange) {
         layers.reserve(topology.size() - 1);
         for(size_t i = 0; i < topology.size() - 1; i++)
-            layers.push_back(Layer(topology[i], topology[i+1], minRand, maxRand));
+            layers.push_back(Layer(topology[i], topology[i+1], randomRange));
     }
     NeuralNetwork(istream& f) {
         size_t size;
@@ -144,70 +159,50 @@ public:
         for(size_t i = 0; i < size; i++)
             layers.push_back(Layer(f));
     }
+    vector<Layer> const& getLayers() const { return layers; }
     Layer const& inputLayer() const { return *layers.begin(); }
     Layer const& outputLayer() const { return *layers.rbegin(); }
     vector<double> const& currentOutput() const { return outputLayer().currentOutput(); }
-    pair<size_t, size_t> dimensions() const {
-        return make_pair(inputLayer().inputSize(), outputLayer().outputSize());
-    }
+    size_t inputSize() const { return inputLayer().inputSize(); }
+    size_t outputSize() const { return outputLayer().outputSize(); }
     vector<double> feedForward(vector<double> const& input) {
         auto out = input;
         for(auto& layer : layers)
             out = layer.feedForward(out);
         return out;
     }
-    void backpropagate(vector<double> const& target, double lam) {
+    void backpropagate(vector<double> const& input, vector<double> const& target, double lam) {
         auto l = layers.size() - 1;
         layers[l].backpropagateOutput(layers[l-1], target, lam);
         for(size_t l = layers.size() - 2; l > 0; l--)
             layers[l].backpropagate(layers[l-1], layers[l+1], lam);
+        layers[0].backpropagateInput(input, layers[1], lam);
     }
-    double batchLearning(dataset data, double eta, double lam) {
+    void batchLearning(dataset const& data, double eta, double lam) {
         for(size_t l = 0; l < layers.size(); l++)
             layers[l].initializeBatchAdjustement();
 
-        double totalError = 0.0;
         for(auto const& pattern : data) {
             feedForward(pattern.first);
-            backpropagate(pattern.second, lam);
-            totalError += squaredError(outputLayer().currentOutput(), pattern.second);
+            backpropagate(pattern.first, pattern.second, lam);
         }
 
         for(size_t l = 0; l < layers.size(); l++)
             layers[l].applyBatchAdjustement(data.size(), eta);
-
+    }
+    double computeTotalError(dataset const& data) {
+        double totalError = 0.0;
+        for(auto const& pattern : data) {
+            feedForward(pattern.first);
+            totalError += squaredError(outputLayer().currentOutput(), pattern.second);
+        }
         return totalError;
     }
-    void serialize(ostream& f) {
-        f << layers.size() << endl;
-        for(auto& l : layers)
-            l.serialize(f);
-    }
 };
 
-class DataManager {
-public:
-    static dataset readBatch(istream& s, pair<size_t, size_t> dimensions) {
-        auto inputs = dimensions.first, outputs = dimensions.second;
-        dataset data;
-        while(!s.eof()) {
-            vector<double> input(inputs);
-            vector<double> output(outputs);
-            for(size_t i = 0; i < inputs;  i++) s >> input[i];
-            for(size_t i = 0; i < outputs; i++) s >> output[i];
-            data.emplace_back(input, output);
-        }
-        data.pop_back();
-        return data;
-    }
-    static vector<vector<double>> streamInput(istream& s, pair<size_t, size_t> dimensions) {
-        auto inputs = dimensions.first, outputs = dimensions.second;
-        vector<vector<double>> data;
-        while(!s.eof()) {
-            vector<double> input(inputs);
-            for(size_t i = 0; i < inputs; i++) s >> input[i];
-            data.emplace_back(input);
-        }
-        return data;
-    }
-};
+std::ostream& operator<<(std::ostream& o, NeuralNetwork const& nn) {
+    o << nn.getLayers().size() << endl;
+    for(auto& l : nn.getLayers())
+        o << l;
+    return o;
+}
