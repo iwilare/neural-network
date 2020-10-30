@@ -1,11 +1,15 @@
 CXX=g++
 CXXFLAGS=
-all: debug
+all: release
 clean:
 	rm nn-run nn-train
+
 debug: CXXFLAGS+=-DDEBUG -g
 debug: nn-run nn-train
+
 release: CXXFLAGS+=-O3
+release: nn-run nn-train
+
 nn-run: NeuralNetworkRun.cpp NeuralNetwork.cpp
 	$(CXX) $(CXXFLAGS) $< -o $@
 nn-train: NeuralNetworkTrain.cpp NeuralNetwork.cpp

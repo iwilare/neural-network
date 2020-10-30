@@ -6,33 +6,73 @@
 #include <sstream>
 #include <algorithm>
 #include <iomanip> // setw
+#include <tuple>
 
 #include "NeuralNetwork.cpp"
 
 using namespace std;
 
-dataset readDataset(istream& s) {
-    size_t inputs, outputs;
-    s >> inputs >> outputs;
-    dataset data;
-    while(!s.eof()) {
-        vector<double> input(inputs);
-        vector<double> output(outputs);
-        for(size_t i = 0; i < inputs;  i++) s >> input[i];
-        for(size_t i = 0; i < outputs; i++) s >> output[i];
-        data.emplace_back(input, output);
-    }
-    data.pop_back();
-    return data;
+enum ValidationType { HOLDOUT, K_FOLD };
+struct Configuration {
+    random_device::result_type seed;
+    ValidationType validationType;
+    size_t maxUnluckyEpochs;
+    double validationPercentage;
+    double validationPercentageDecreaseEpsilon;
+    Configuration(random_device::result_type seed=random_device()(),
+                  ValidationType validationType=HOLDOUT,
+                  size_t maxUnluckyEpochs=1000,
+                  double validationPercentage=0.25,
+                  double validationPercentageDecreaseEpsilon=0.005)
+        : seed(seed),
+          validationType(validationType),
+          maxUnluckyEpochs(maxUnluckyEpochs),
+          validationPercentage(validationPercentage),
+          validationPercentageDecreaseEpsilon(validationPercentageDecreaseEpsilon) {}
+};
+
+std::istream& operator>>(std::istream& o, Configuration& c) {
+    string command;
+    while(o >> command)
+        if(command == "validationType") {
+            string validationType;
+            o >> validationType;
+            if(validationType == "HOLDOUT")
+                c.validationType = HOLDOUT;
+            else if(validationType == "K_FOLD")
+                c.validationType = K_FOLD;
+        } else if(command == "seed") {
+            o >> c.seed;
+        } else if(command == "maxUnluckyEpochs") {
+            o >> c.maxUnluckyEpochs;
+        } else if(command == "validationPercentage") {
+            o >> c.validationPercentage;
+        } else if(command == "validationPercentageDecreaseEpsilon") {
+            o >> c.validationPercentageDecreaseEpsilon;
+        }
+    return o;
 }
 
-class Hyperconfiguration {
-public:
+std::istream& operator>>(std::istream& o, dataset& d) {
+    size_t inputs, outputs;
+    o >> inputs >> outputs;
+    while(!o.eof()) {
+        vector<double> input(inputs);
+        vector<double> output(outputs);
+        for(size_t i = 0; i < inputs;  i++) o >> input[i];
+        for(size_t i = 0; i < outputs; i++) o >> output[i];
+        d.emplace_back(input, output);
+    }
+    d.pop_back();
+    return o;
+}
+
+struct Hyperconfiguration {
+    vector<size_t> topology;
     double lam;
     double eta;
     double alpha;
     double randomRange;
-    vector<size_t> topology;
     Hyperconfiguration(vector<size_t> topology={},
                        double lam=0.0,
                        double eta=1.0,
@@ -40,7 +80,8 @@ public:
                        double randomRange=0.9)
         : topology(topology), lam(lam), eta(eta), alpha(alpha), randomRange(randomRange) {}
 };
-std::ostream& operator<< (std::ostream& o, Hyperconfiguration const& c) {
+
+std::ostream& operator<<(std::ostream& o, Hyperconfiguration const& c) {
     o << "{";
     o << "lam=" << c.lam << ", ";
     o << "eta=" << c.eta << ", ";
@@ -54,126 +95,131 @@ std::ostream& operator<< (std::ostream& o, Hyperconfiguration const& c) {
     return o;
 }
 
-vector<Hyperconfiguration> readHyperparameters(ifstream& hyperFile) {
-    vector<Hyperconfiguration> hyperparameters;
+std::istream& operator>>(std::istream& o, vector<Hyperconfiguration>& hyperparameters) {
     string line;
-    for(string line; getline(hyperFile, line); ) {
+    for(string line; getline(o, line); ) {
         istringstream s(line);
         string command;
         Hyperconfiguration conf;
         while(s >> command)
             if(command == "lam") {
-                double lam; s >> conf.lam;
+                s >> conf.lam;
             } else if(command == "eta") {
-                double eta; s >> conf.eta;
+                s >> conf.eta;
             } else if(command == "alpha") {
-                double alpha; s >> conf.alpha;
+                s >> conf.alpha;
             } else if(command == "top") {
                 for(size_t top; s >> top; )
                     conf.topology.push_back(top);
             }
         hyperparameters.push_back(conf);
     }
-    return hyperparameters;
+    return o;
 }
 
 class Validation {
 public:
-    static NeuralNetwork optimize(dataset data, Hyperconfiguration const& c, double threshold) {
-        auto nn = NeuralNetwork(c.topology, c.randomRange);
-
-        double totalError;
-        do {
-            nn.batchLearning(data, c.eta, c.lam);
-            totalError = nn.computeTotalError(data);
-            cerr << "Total dataset error: " << totalError << endl;
-            cout << nn << endl;
-        } while(totalError > threshold);
-
-        return nn;
-    }
     static pair<dataset, dataset> split(dataset data, size_t secondSetSize) {
         auto firstSetSize = data.size() - secondSetSize;
         dataset a(data.begin(), data.begin() + firstSetSize);
         dataset b(              data.begin() + firstSetSize, data.end());
         return make_pair(a, b);
     }
-    static pair<Hyperconfiguration, vector<vector<pair<double, double>>>>
-            holdout(dataset data, vector<Hyperconfiguration> hyperchoices, size_t maxUnluckyEpochs, double validationPercentage) {
+    static tuple<Hyperconfiguration, NeuralNetwork, size_t, double, vector<vector<pair<double, double>>>>
+            holdout(Configuration const& c, vector<Hyperconfiguration> const& hyperchoices, dataset data) {
         vector<vector<pair<double, double>>> resultHistory;
 
-        shuffle(data.begin(), data.end(), mt19937(random_device()()));
+        shuffle(data.begin(), data.end(), mt19937(c.seed));
 
-        pair<dataset, dataset> dataSplit = split(data, data.size() * validationPercentage);
+        pair<dataset, dataset> dataSplit = split(data, data.size() * c.validationPercentage);
         auto trainingSet   = dataSplit.first;
         auto validationSet = dataSplit.second;
 
+        cerr << "Seed: " << c.seed << ", training size: " << trainingSet.size() << ", validation size: " << validationSet.size() << endl;
+
         Hyperconfiguration absoluteBestConfiguration;
         double absoluteBestValidationError = INFINITY;
-        for(auto c : hyperchoices) {
+        NeuralNetwork bestNN;
+        size_t bestEpoch = 0;
+        for(auto h : hyperchoices) {
             size_t unluckyEpochs = 0;
             size_t epoch = 0;
             double bestValidationError = INFINITY, previousValidationError = INFINITY;
             vector<pair<double, double>> validationGraph;
-            cerr << endl << "Evaluating " << c << endl;
-            auto nn = NeuralNetwork(c.topology, c.randomRange);
+            cerr << "Evaluating " << h << endl;
+            auto nn = NeuralNetwork(h.topology, h.randomRange, c.seed);
             do {
-                nn.batchLearning(trainingSet, c.eta, c.lam);
-                auto trainingError   = nn.computeTotalError(trainingSet);
-                auto validationError = nn.computeTotalError(validationSet);
+                nn.batchLearning(trainingSet, h.eta, h.lam);
+                auto trainingError   = nn.computeMeanSquaredError(trainingSet);
+                auto validationError = nn.computeMeanSquaredError(validationSet);
                 epoch++;
 
-                if(validationError > previousValidationError) {
-                    unluckyEpochs++;
-                } else if(validationError < previousValidationError) {
+                //if(previousValidationError - validationError > previousValidationError * c.validationPercentageDecreaseEpsilon) {
+                if(validationError < previousValidationError) {
                     bestValidationError = validationError;
                     unluckyEpochs = 0;
-                }
+                } else
+                    unluckyEpochs++;
                 previousValidationError = validationError;
                 validationGraph.emplace_back(trainingError, validationError);
 
-                cerr << "\rT=" << left << setw(10) << trainingError << " V=" << left << setw(10) << validationError << " E=" << epoch;
-            } while(unluckyEpochs < maxUnluckyEpochs);
+                if(epoch % 1000 == 0)
+                    cerr << " T="  << left << setw(std::numeric_limits<double>::digits10) << trainingError
+                         << " V="  << left << setw(std::numeric_limits<double>::digits10) << validationError
+                         << " E="  << epoch
+                         << endl;
+            } while(unluckyEpochs < c.maxUnluckyEpochs);
             if(bestValidationError < absoluteBestValidationError) {
                 absoluteBestValidationError = bestValidationError;
-                absoluteBestConfiguration = c;
+                absoluteBestConfiguration = h;
+                bestNN = nn;
+                bestEpoch = epoch;
             }
             resultHistory.push_back(validationGraph);
         }
-        cerr << "Absolute best with V=" << absoluteBestValidationError << ": " << absoluteBestConfiguration << endl;
-        return make_pair(absoluteBestConfiguration, resultHistory);
+        return make_tuple(absoluteBestConfiguration, bestNN, bestEpoch, absoluteBestValidationError, resultHistory);
     }
 };
 
 class Control {
 public:
-    static void start(dataset const& data, vector<Hyperconfiguration> const& hyperparameters) {
-        //cout << Validation::optimize(data, hyperparameters[0], 0.001);
-        //return;
+    static void start(Configuration const& config, vector<Hyperconfiguration> const& hyperparameters, dataset const& data) {
 
-        auto result = Validation::holdout(data, hyperparameters, 100, 25.0/100.0);
+        auto result = Validation::holdout(config, hyperparameters, data);
 
-        size_t i = 0;
-        for(auto const& g : result.second) {
-            cerr << i << " " << g.size() << endl;
-            for(auto const& t : g)
-                cerr << t.first << ", " << t.second << endl;
-        }
-        cerr << "---" << endl;
-        cerr << result.first << endl;
+        cerr << "Absolute best after " << get<2>(result)
+             << " epochs, V="          << get<3>(result)
+             << ": " << endl
+             << get<0>(result) << endl;
+        cerr << get<1>(result);
+
+        //size_t i = 0;
+        //for(auto const& g : result.second) {
+        //    cerr << i << " " << g.size() << endl;
+        //    for(auto const& t : g)
+        //        cerr << t.first << ", " << t.second << endl;
+        //}
+        //cerr << "---" << endl;
+        //cerr << result.first << endl;
     }
 };
 
 int main(int argc, char const *argv[]) {
-    if(argc != 2) {
-        cerr << "Usage: " << argv[0] << " hyperParametersFile.hyp < dataset.dat > model.nn\n";
+    if(argc != 2 && argc != 3) {
+        cerr << "Usage: " << argv[0] << " hyperParametersFile.hyp [configuration.config] < dataset.dat > model.nn\n";
         return 1;
     } else {
         vector<string> arguments(argv + 1, argv + argc);
-        ifstream hyperparametersFile(arguments[0]);
-        auto hyperparameters = readHyperparameters(hyperparametersFile);
-        auto data            = readDataset(cin);
 
-        Control::start(data, hyperparameters);
+        dataset data;
+        Configuration config;
+        vector<Hyperconfiguration> hyperparameters;
+
+        if(arguments.size() == 2)
+        ifstream(arguments[1]) >> config;
+        ifstream(arguments[0]) >> hyperparameters;
+        cin                    >> data;
+
+        Control::start(config, hyperparameters, data);
     }
 }
