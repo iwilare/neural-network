@@ -8,7 +8,8 @@ typedef vector<pair<vector<double>, vector<double>>> dataset;
 
 double squaredError(vector<double> const& output, vector<double> const& target) {
     double sum = 0;
-    for(size_t i = 0; i < output.size(); i++)
+    // We iterate on target because output might have the bias at the end
+    for(size_t i = 0; i < target.size(); i++)
         sum += (target[i] - output[i]) * (target[i] - output[i]);
     return sum;
 }
@@ -23,110 +24,102 @@ private:
     size_t inputs, outputs;
     vector<vector<double>> weights;
     vector<vector<double>> weightsAdj;
-    vector<double>         bias;
-    vector<double>         biasAdj;
-    vector<double>         deltas;
-    vector<double>         output;
 
-    void allocate(size_t inputs, size_t outputs) {
+    vector<double> deltas;
+    vector<double> output;
+
+    void allocateInitialize(size_t inputs, size_t outputs) {
         this->inputs = inputs;
         this->outputs = outputs;
 
         weights.resize(outputs);
         for(size_t i = 0; i < outputs; i++)
-            weights[i].resize(inputs);
-        bias.resize(outputs);
+            weights[i].resize(inputs + 1);
 
         weightsAdj.resize(outputs);
         for(size_t i = 0; i < outputs; i++)
-            weightsAdj[i].resize(inputs);
-        biasAdj.resize(outputs);
+            weightsAdj[i].resize(inputs + 1);
 
-        output.resize(outputs);
+        output.resize(outputs + 1);
+        output[outputs] = 1.0;
+
         deltas.resize(outputs);
     }
 public:
     Layer(istream& f) {
         f >> inputs >> outputs;
 
-        allocate(inputs, outputs);
+        allocateInitialize(inputs, outputs);
 
         for(size_t i = 0; i < outputs; i++)
-            for(size_t j = 0; j < inputs; j++)
+            for(size_t j = 0; j < inputs + 1; j++)
                 f >> weights[i][j];
-        for(size_t i = 0; i < outputs; i++)
-            f >> bias[i];
     }
     Layer(size_t inputs, size_t outputs, double randomRange, random_device::result_type seed) {
-        allocate(inputs, outputs);
+        allocateInitialize(inputs, outputs);
 
         mt19937 mt = mt19937(seed);
         uniform_real_distribution<> dis(-randomRange, +randomRange);
         for(size_t i = 0; i < outputs; i++)
-            for(size_t j = 0; j < inputs; j++) {
+            for(size_t j = 0; j < inputs + 1; j++)
                 weights[i][j] = dis(mt);
-            }
-        for(size_t i = 0; i < outputs; i++)
-            bias[i] = dis(mt);
-        // Biases not initialized to zero
     }
     vector<double> const& currentOutput() const { return output; }
     size_t inputSize() const { return inputs; }
     size_t outputSize() const { return outputs; }
-    vector<double> const& getBias() const { return bias; }
     vector<vector<double>> const& getWeights() const { return weights; }
     void initializeBatchAdjustement() {
         for(size_t i = 0; i < outputs; i++)
             fill(weightsAdj[i].begin(), weightsAdj[i].end(), 0.0);
-        fill(biasAdj.begin(), biasAdj.end(), 0.0);
     }
     void applyBatchAdjustement(double scaling, double eta) {
         for(size_t i = 0; i < outputs; i++) {
-            for(size_t j = 0; j < inputs; j++)
+            for(size_t j = 0; j < inputs + 1; j++)
                weights[i][j] += weightsAdj[i][j] * eta / scaling;
-            bias[i] += biasAdj[i] * eta / scaling;
         }
     }
+    // Requires that input has 1.0 at the end
     vector<double> const& feedForward(vector<double> const& input) {
         for(size_t i = 0; i < outputs; i++) {
-            auto net = bias[i];
-            for(size_t j = 0; j < inputs; j++)
+            double net = 0.0;
+            for(size_t j = 0; j < inputs + 1; j++)
                 net += weights[i][j] * input[j];
             output[i] = tanh(net);
         }
         return output;
     }
-    void backpropagate(vector<double> const& previousLayerOutputs, vector<double> const& nextLayerDeltas, double lam) {
+    // Requires that previousLayerOutputs has 1.0 at the end
+    void backpropagate(vector<double> const& previousLayerOutputs, vector<double> const& localError, double lam) {
         for(size_t i = 0; i < outputs; i++) {
-            deltas[i] = nextLayerDeltas[i] * (1 - output[i] * output[i]);
-            for(size_t j = 0; j < inputs; j++)
+            deltas[i] = localError[i] * (1 - output[i] * output[i]);
+            for(size_t j = 0; j < inputs + 1; j++)
                 weightsAdj[i][j] += -previousLayerOutputs[j] * deltas[i]; // Add normalization here
-            biasAdj[i] += -1 * deltas[i];
         }
     }
-    void backpropagateOutput(Layer& previousLayer, vector<double> const& target, double lam) {
-        vector<double> nextLayerDeltas(outputSize());
+    void backpropagateOutput(Layer const& previousLayer, vector<double> const& target, double lam) {
+        vector<double> localError(outputSize());
         for(size_t i = 0; i < outputs; i++)
-            nextLayerDeltas[i] = (output[i] - target[i]);
-        backpropagate(previousLayer.currentOutput(), nextLayerDeltas, lam);
+            localError[i] = (output[i] - target[i]);
+        backpropagate(previousLayer.currentOutput(), localError, lam);
     }
-    void backpropagateHidden(Layer& previousLayer, Layer& nextLayer, double lam) {
-        vector<double> nextLayerDeltas(outputSize());
+    void backpropagateHidden(Layer const& previousLayer, Layer const& nextLayer, double lam) {
+        vector<double> localError(outputSize());
         for(size_t i = 0; i < outputs; i++) {
-            nextLayerDeltas[i] = 0.0;
+            localError[i] = 0.0;
             for(size_t k = 0; k < nextLayer.outputs; k++)
-                nextLayerDeltas[i] += nextLayer.deltas[k] * nextLayer.weights[k][i];
+                localError[i] += nextLayer.deltas[k] * nextLayer.weights[k][i];
         }
-        backpropagate(previousLayer.currentOutput(), nextLayerDeltas, lam);
+        backpropagate(previousLayer.currentOutput(), localError, lam);
     }
+    // Requires that input has 1.0 at the end
     void backpropagateInput(vector<double> const& input, Layer& nextLayer, double lam) {
-        vector<double> nextLayerDeltas(outputSize());
+        vector<double> localError(outputSize());
         for(size_t i = 0; i < outputs; i++) {
-            nextLayerDeltas[i] = 0.0;
+            localError[i] = 0.0;
             for(size_t k = 0; k < nextLayer.outputs; k++)
-                nextLayerDeltas[i] += nextLayer.deltas[k] * nextLayer.weights[k][i];
+                localError[i] += nextLayer.deltas[k] * nextLayer.weights[k][i];
         }
-        backpropagate(input, nextLayerDeltas, lam);
+        backpropagate(input, localError, lam);
     }
 };
 
@@ -137,8 +130,6 @@ std::ostream& operator<<(std::ostream& o, Layer const& l) {
             o << v << " ";
         o << endl;
     }
-    for(auto const& b : l.getBias())
-        o << b << " ";
     o << endl;
     return o;
 }
@@ -166,17 +157,23 @@ public:
     size_t inputSize() const { return inputLayer().inputSize(); }
     size_t outputSize() const { return outputLayer().outputSize(); }
     vector<double> feedForward(vector<double> const& input) {
-        auto out = input;
+        vector<double> inputAndBias(input);
+        inputAndBias.push_back(1.0);
+
+        auto out = inputAndBias;
         for(auto& layer : layers)
             out = layer.feedForward(out);
         return out;
     }
     void backpropagate(vector<double> const& input, vector<double> const& target, double lam) {
+        vector<double> inputAndBias(input);
+        inputAndBias.push_back(1.0);
+
         auto l = layers.size() - 1;
         layers[l].backpropagateOutput(layers[l-1], target, lam);
         for(size_t l = layers.size() - 2; l > 0; l--)
             layers[l].backpropagateHidden(layers[l-1], layers[l+1], lam);
-        layers[0].backpropagateInput(input, layers[1], lam);
+        layers[0].backpropagateInput(inputAndBias, layers[1], lam);
     }
     void batchLearning(dataset const& data, double eta, double lam) {
         for(size_t l = 0; l < layers.size(); l++)
