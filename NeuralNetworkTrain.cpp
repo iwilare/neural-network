@@ -1,34 +1,35 @@
-#include <vector>
-#include <iostream>
-#include <random>
-#include <fstream>
-#include <map>
-#include <sstream>
-#include <algorithm>
-#include <iomanip> // setw
-#include <tuple>
+#include <bits/stdc++.h>
 
 #include "NeuralNetwork.cpp"
 
+#define DEFAULT_SEED -1
+
 using namespace std;
 
-enum ValidationType { HOLDOUT, K_FOLD };
+enum ValidationType { EXTERNAL_VALIDATION, HOLDOUT, K_FOLD };
+
 struct Configuration {
     random_device::result_type seed;
     ValidationType validationType;
     size_t maxUnluckyEpochs;
     double validationPercentage;
     double validationPercentageDecreaseEpsilon;
-    Configuration(random_device::result_type seed=random_device()(),
+    string externalValidationFile;
+    bool isClassification;
+    Configuration(random_device::result_type seed=DEFAULT_SEED,
                   ValidationType validationType=HOLDOUT,
                   size_t maxUnluckyEpochs=1000,
+                  bool isClassification=false,
                   double validationPercentage=0.25,
-                  double validationPercentageDecreaseEpsilon=0.005)
-        : seed(seed),
+                  double validationPercentageDecreaseEpsilon=0.005,
+                  string externalValidationFile="")
+        : seed(seed != DEFAULT_SEED ? seed : random_device()()),
+          isClassification(isClassification),
           validationType(validationType),
           maxUnluckyEpochs(maxUnluckyEpochs),
           validationPercentage(validationPercentage),
-          validationPercentageDecreaseEpsilon(validationPercentageDecreaseEpsilon) {}
+          validationPercentageDecreaseEpsilon(validationPercentageDecreaseEpsilon),
+          externalValidationFile(externalValidationFile) {}
 };
 
 std::istream& operator>>(std::istream& o, Configuration& c) {
@@ -37,19 +38,19 @@ std::istream& operator>>(std::istream& o, Configuration& c) {
         if(command == "validationType") {
             string validationType;
             o >> validationType;
-            if(validationType == "HOLDOUT")
+            if(validationType == "EXTERNAL_VALIDATION")
+                c.validationType = EXTERNAL_VALIDATION;
+            else if(validationType == "HOLDOUT")
                 c.validationType = HOLDOUT;
             else if(validationType == "K_FOLD")
                 c.validationType = K_FOLD;
-        } else if(command == "seed") {
-            o >> c.seed;
-        } else if(command == "maxUnluckyEpochs") {
-            o >> c.maxUnluckyEpochs;
-        } else if(command == "validationPercentage") {
-            o >> c.validationPercentage;
-        } else if(command == "validationPercentageDecreaseEpsilon") {
-            o >> c.validationPercentageDecreaseEpsilon;
         }
+        else if(command == "seed")                                o >> c.seed;
+        else if(command == "maxUnluckyEpochs")                    o >> c.maxUnluckyEpochs;
+        else if(command == "validationPercentage")                o >> c.validationPercentage;
+        else if(command == "isClassification")                    o >> c.isClassification;
+        else if(command == "externalValidationFile")              o >> c.externalValidationFile;
+        else if(command == "validationPercentageDecreaseEpsilon") o >> c.validationPercentageDecreaseEpsilon;
     return o;
 }
 
@@ -69,28 +70,32 @@ std::istream& operator>>(std::istream& o, dataset& d) {
 
 struct Hyperconfiguration {
     vector<size_t> topology;
-    double lam;
     double eta;
+    double lambda;
     double alpha;
     double randomRange;
+    random_device::result_type seed;
     Hyperconfiguration(vector<size_t> topology={},
-                       double lam=0.0,
                        double eta=1.0,
+                       double lambda=0.0,
                        double alpha=0.0,
-                       double randomRange=0.9)
-        : topology(topology), lam(lam), eta(eta), alpha(alpha), randomRange(randomRange) {}
+                       double randomRange=0.9,
+                       random_device::result_type seed=DEFAULT_SEED)
+        : topology(topology), lambda(lambda), eta(eta), alpha(alpha), randomRange(randomRange),
+          seed(seed != DEFAULT_SEED ? seed : random_device()()) {}
 };
 
 std::ostream& operator<<(std::ostream& o, Hyperconfiguration const& c) {
     o << "{";
-    o << "lam=" << c.lam << ", ";
-    o << "eta=" << c.eta << ", ";
-    o << "alpha=" << c.alpha << ", ";
+    o << "eta="         << c.eta         << ", ";
+    o << "lambda="      << c.lambda      << ", ";
+    o << "alpha="       << c.alpha       << ", ";
     o << "randomRange=" << c.randomRange << ", ";
     o << "top=[ ";
     for(auto& t : c.topology)
         o << t << " ";
-    o << "]";
+    o << "], ";
+    o << "seed=" << c.seed;
     o << "}";
     return o;
 }
@@ -102,16 +107,15 @@ std::istream& operator>>(std::istream& o, vector<Hyperconfiguration>& hyperparam
         string command;
         Hyperconfiguration conf;
         while(s >> command)
-            if(command == "lam") {
-                s >> conf.lam;
-            } else if(command == "eta") {
-                s >> conf.eta;
-            } else if(command == "alpha") {
-                s >> conf.alpha;
-            } else if(command == "top") {
+            if(command == "top") {
                 for(size_t top; s >> top; )
                     conf.topology.push_back(top);
             }
+            else if(command == "lambda")      s >> conf.lambda;
+            else if(command == "eta")         s >> conf.eta;
+            else if(command == "alpha")       s >> conf.alpha;
+            else if(command == "randomRange") s >> conf.randomRange;
+            else if(command == "seed")        s >> conf.seed;
         hyperparameters.push_back(conf);
     }
     return o;
@@ -119,79 +123,118 @@ std::istream& operator>>(std::istream& o, vector<Hyperconfiguration>& hyperparam
 
 class Validation {
 public:
-    static pair<dataset, dataset> split(dataset data, size_t secondSetSize) {
-        auto firstSetSize = data.size() - secondSetSize;
-        dataset a(data.begin(), data.begin() + firstSetSize);
-        dataset b(              data.begin() + firstSetSize, data.end());
-        return make_pair(a, b);
-    }
-    static tuple<Hyperconfiguration, NeuralNetwork, size_t, double, vector<vector<pair<double, double>>>>
-            holdout(Configuration const& c, vector<Hyperconfiguration> const& hyperchoices, dataset data) {
-        vector<vector<pair<double, double>>> resultHistory;
+    typedef tuple<NeuralNetwork, Hyperconfiguration, size_t, double, vector<vector<pair<double, double>>>> ValidationResults;
 
+    static ValidationResults externalValidation(Configuration const& c, vector<Hyperconfiguration> const& hyperchoices, dataset training) {
+        dataset validation;
+        auto file = ifstream(c.externalValidationFile);
+
+        file >> validation;
+
+        return Validation::validation(c, hyperchoices, training, validation);
+    }
+    static ValidationResults holdout(Configuration const& c, vector<Hyperconfiguration> const& hyperchoices, dataset data) {
         shuffle(data.begin(), data.end(), mt19937(c.seed));
 
-        pair<dataset, dataset> dataSplit = split(data, data.size() * c.validationPercentage);
-        auto trainingSet   = dataSplit.first;
-        auto validationSet = dataSplit.second;
+        auto split = [](dataset data, size_t secondSetSize) -> pair<dataset, dataset> {
+            auto firstSetSize = data.size() - secondSetSize;
+            dataset a(data.begin(), data.begin() + firstSetSize);
+            dataset b(              data.begin() + firstSetSize, data.end());
+            return make_pair(a, b);
+        };
 
-        cerr << "Seed: " << c.seed << ", training size: " << trainingSet.size() << ", validation size: " << validationSet.size() << endl;
+        pair<dataset, dataset> dataSplit = split(data, data.size() * c.validationPercentage);
+        auto training   = dataSplit.first;
+        auto validation = dataSplit.second;
+
+        return Validation::validation(c, hyperchoices, training, validation);
+    }
+    static ValidationResults validation(Configuration const& c, vector<Hyperconfiguration> const& hyperchoices, dataset& training, dataset& validation) {
+        vector<vector<pair<double, double>>> resultHistory;
+
+        cerr << "Seed: " << c.seed
+             << ", training size: "   << training.size()
+             << ", validation size: " << validation.size() << endl;
 
         Hyperconfiguration absoluteBestConfiguration;
         double absoluteBestValidationError = INFINITY;
         NeuralNetwork bestNN;
-        size_t bestEpoch = 0;
+        size_t absoluteBestEpoch = 0;
+
         for(auto h : hyperchoices) {
             size_t unluckyEpochs = 0;
             size_t epoch = 0;
-            double bestValidationError = INFINITY, previousValidationError = INFINITY;
+            size_t bestEpoch = 0;
+            double bestValidationError = INFINITY, oldValidationError = INFINITY;
             vector<pair<double, double>> validationGraph;
             cerr << "Evaluating " << h << endl;
-            auto nn = NeuralNetwork(h.topology, h.randomRange, c.seed);
-            do {
-                nn.batchLearning(trainingSet, h.eta, h.lam);
-                auto trainingError   = nn.computeMeanSquaredError(trainingSet);
-                auto validationError = nn.computeMeanSquaredError(validationSet);
-                epoch++;
+            auto nn = NeuralNetwork(h.topology, h.randomRange, h.seed != DEFAULT_SEED ? h.seed : h.seed);
 
-                //if(previousValidationError - validationError > previousValidationError * c.validationPercentageDecreaseEpsilon) {
-                if(validationError < previousValidationError) {
-                    bestValidationError = validationError;
+            if(!nn.compatible(training)) {
+                cerr << "Topology in hyperconfigurations incompatible with training set, received: ("  << training[0].first.size() << "->" << training[0].second.size() << "), expected (" << nn.inputSize() << "->" << nn.outputSize() << ")." << endl;
+                exit(1);
+            }
+            if(!nn.compatible(validation)) {
+                cerr << "Topology in hyperconfigurations incompatible with validation set, received: ("  << validation[0].first.size() << "->" << validation[0].second.size() << "), expected (" << nn.inputSize() << "->" << nn.outputSize() << ")." << endl;
+                exit(1);
+            }
+
+            do {
+                epoch++;
+                nn.batchLearning(training, h.eta, h.lambda, h.alpha);
+                auto trainingError   = c.isClassification ? nn.computeClassificationError(training)   : nn.computeMeanSquaredError(training);
+                auto validationError = c.isClassification ? nn.computeClassificationError(validation) : nn.computeMeanSquaredError(validation);
+
+                // if(oldValidationError - validationError > oldValidationError * c.validationPercentageDecreaseEpsilon) {
+
+                if(validationError < oldValidationError) {
+                    if(validationError < bestValidationError) {
+                        bestValidationError = validationError;
+                        bestEpoch = epoch;
+                    }
                     unluckyEpochs = 0;
                 } else
                     unluckyEpochs++;
-                previousValidationError = validationError;
+                oldValidationError = validationError;
                 validationGraph.emplace_back(trainingError, validationError);
 
-                if(epoch % 1000 == 0)
+                if(epoch % 10 == 0)
                     cerr << " T="  << left << setw(std::numeric_limits<double>::digits10) << trainingError
                          << " V="  << left << setw(std::numeric_limits<double>::digits10) << validationError
                          << " E="  << epoch
                          << endl;
             } while(unluckyEpochs < c.maxUnluckyEpochs);
             if(bestValidationError < absoluteBestValidationError) {
+                bestNN                      = nn;
+                absoluteBestConfiguration   = h;
+                absoluteBestEpoch           = bestEpoch;
                 absoluteBestValidationError = bestValidationError;
-                absoluteBestConfiguration = h;
-                bestNN = nn;
-                bestEpoch = epoch;
             }
             resultHistory.push_back(validationGraph);
         }
-        return make_tuple(absoluteBestConfiguration, bestNN, bestEpoch, absoluteBestValidationError, resultHistory);
+        return make_tuple(bestNN, absoluteBestConfiguration, absoluteBestEpoch, absoluteBestValidationError, resultHistory);
     }
 };
 
 class Control {
 public:
     static void start(Configuration const& config, vector<Hyperconfiguration> const& hyperparameters, dataset const& data) {
-
-        auto result = Validation::holdout(config, hyperparameters, data);
-
-        cerr << "Absolute best after " << get<2>(result)
-             << " epochs, V="          << get<3>(result)
-             << ": " << endl
-             << get<0>(result) << endl;
-        cerr << get<1>(result);
+        Validation::ValidationResults results;
+        switch(config.validationType) {
+            case HOLDOUT: {
+                results = Validation::holdout(config, hyperparameters, data);
+                break;
+            }
+            case EXTERNAL_VALIDATION: {
+                results = Validation::externalValidation(config, hyperparameters, data);
+                break;
+            }
+        }
+        cerr << "Absolute best after " << get<2>(results)
+            << " epochs, V="           << get<3>(results)
+            << ": " << endl;
+        cerr << get<1>(results) << endl;
+        cerr << get<0>(results);
 
         //size_t i = 0;
         //for(auto const& g : result.second) {
@@ -218,7 +261,7 @@ int main(int argc, char const *argv[]) {
         if(arguments.size() == 2)
         ifstream(arguments[1]) >> config;
         ifstream(arguments[0]) >> hyperparameters;
-        cin                    >> data;
+        cin >> data;
 
         Control::start(config, hyperparameters, data);
     }

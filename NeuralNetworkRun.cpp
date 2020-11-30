@@ -1,10 +1,4 @@
-#include <vector>
-#include <iostream>
-#include <random>
-#include <fstream>
-#include <iterator>
-#include <algorithm>
-#include <istream>
+#include <bits/stdc++.h>
 
 #include "NeuralNetwork.cpp"
 
@@ -20,7 +14,7 @@ class NeuralNetworkInput {
     public:
         Iterator(istream& input, size_t inputs, bool end) : input(input), inputs(inputs), end(end) {}
         Iterator const& operator++() { return *this; }
-        // Not idempotent
+        // Strictly not idempotent
         vector<double> operator*() {
             vector<double> pattern(inputs);
             size_t i;

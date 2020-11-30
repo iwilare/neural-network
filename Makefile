@@ -1,8 +1,10 @@
 CXX=g++
 CXXFLAGS=
-all: release
+all: base
 clean:
 	rm nn-run nn-train
+
+base: nn-run nn-train
 
 debug: CXXFLAGS+=-DDEBUG -g
 debug: nn-run nn-train
