@@ -50,7 +50,6 @@ std::istream& operator>>(std::istream& o, Configuration& c) {
         else if(command == "validationPercentage")                o >> c.validationPercentage;
         else if(command == "isClassification")                    o >> c.isClassification;
         else if(command == "externalValidationFile")              o >> c.externalValidationFile;
-        else if(command == "validationPercentageDecreaseEpsilon") o >> c.validationPercentageDecreaseEpsilon;
     return o;
 }
 
@@ -165,7 +164,7 @@ public:
             size_t unluckyEpochs = 0;
             size_t epoch = 0;
             size_t bestEpoch = 0;
-            double bestValidationError = INFINITY, oldValidationError = INFINITY;
+            double bestValidationError = INFINITY;
             vector<pair<double, double>> validationGraph;
             cerr << "Evaluating " << h << endl;
             auto nn = NeuralNetwork(h.topology, h.randomRange, h.seed != DEFAULT_SEED ? h.seed : h.seed);
@@ -185,17 +184,12 @@ public:
                 auto trainingError   = c.isClassification ? nn.computeClassificationError(training)   : nn.computeMeanSquaredError(training);
                 auto validationError = c.isClassification ? nn.computeClassificationError(validation) : nn.computeMeanSquaredError(validation);
 
-                // if(oldValidationError - validationError > oldValidationError * c.validationPercentageDecreaseEpsilon) {
-
-                if(validationError < oldValidationError) {
-                    if(validationError < bestValidationError) {
-                        bestValidationError = validationError;
-                        bestEpoch = epoch;
-                    }
+                if(validationError < bestValidationError) {
+                    bestValidationError = validationError;
+                    bestEpoch = epoch;
                     unluckyEpochs = 0;
                 } else
                     unluckyEpochs++;
-                oldValidationError = validationError;
                 validationGraph.emplace_back(trainingError, validationError);
 
                 if(epoch % 10 == 0)

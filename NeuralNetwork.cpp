@@ -78,7 +78,7 @@ public:
         for(auto& weightsAdjRow : weightsAdj)
             fill(weightsAdjRow.begin(), weightsAdjRow.end(), 0.0);
     }
-    void applyBatchAdjustement(double scaling, double eta, double alpha, double lambda) {
+    void applyBatchAdjustement(double scaling, double eta, double lambda, double alpha) {
         for(size_t i = 0; i < outputs; i++) {
             for(size_t j = 0; j < inputs + 1; j++) {
                 // Include Nesterov momentum; modifying weightsAdj will also impact the next oldWeightsAdj.
