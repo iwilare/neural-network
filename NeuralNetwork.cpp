@@ -5,7 +5,7 @@ using namespace std;
 typedef vector<pair<vector<double>, vector<double>>> dataset;
 
 double squaredError(vector<double> const& output, vector<double> const& target) {
-    double sum = 0;
+    double sum = 0.0;
     // We iterate on target because output might have the bias at the end
     for(size_t i = 0; i < target.size(); i++)
         sum += (target[i] - output[i]) * (target[i] - output[i]);
@@ -14,7 +14,7 @@ double squaredError(vector<double> const& output, vector<double> const& target) 
 
 vector<int> discretize(vector<double> const& v) {
     vector<int> discrete(v.size());
-    transform(v.begin(), v.end(), discrete.begin(), [](auto x) { return x > 0 ? 1 : -1; });
+    transform(v.begin(), v.end(), discrete.begin(), [](auto x) { return x >= 0.0 ? 1 : -1; });
     return discrete;
 }
 
@@ -144,6 +144,7 @@ std::ostream& operator<<(std::ostream& o, Layer const& l) {
 }
 
 class NeuralNetwork {
+private:
     vector<Layer> layers;
 public:
     NeuralNetwork() {}
@@ -173,7 +174,7 @@ public:
         auto out = inputAndBias;
         for(auto& layer : layers)
             out = layer.feedForward(out);
-        return outputLayer().currentOutput();
+        return currentOutput();
     }
     void backpropagate(vector<double> const& input, vector<double> const& target) {
         vector<double> inputAndBias(input);
@@ -201,15 +202,14 @@ public:
         double totalError = 0.0;
         for(auto const& pattern : data) {
             feedForward(pattern.first);
-            totalError += squaredError(outputLayer().currentOutput(), pattern.second);
+            totalError += squaredError(currentOutput(), pattern.second);
         }
         return totalError / data.size();
     }
     vector<int> classify(vector<double> const& input) {
         return discretize(feedForward(input));
     }
-    // double is so that the compute**Error methods are signature-compatible
-    double computeClassificationError(dataset const& data) {
+    size_t computeClassificationError(dataset const& data) {
         size_t errors = 0;
         for(auto const& pattern : data) {
             auto output = classify(pattern.first);

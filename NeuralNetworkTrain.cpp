@@ -50,6 +50,7 @@ std::istream& operator>>(std::istream& o, Configuration& c) {
         else if(command == "validationPercentage")                o >> c.validationPercentage;
         else if(command == "isClassification")                    o >> c.isClassification;
         else if(command == "externalValidationFile")              o >> c.externalValidationFile;
+        else if(command == "validationPercentageDecreaseEpsilon") o >> c.validationPercentageDecreaseEpsilon;
     return o;
 }
 
@@ -110,8 +111,8 @@ std::istream& operator>>(std::istream& o, vector<Hyperconfiguration>& hyperparam
                 for(size_t top; s >> top; )
                     conf.topology.push_back(top);
             }
-            else if(command == "lambda")      s >> conf.lambda;
             else if(command == "eta")         s >> conf.eta;
+            else if(command == "lambda")      s >> conf.lambda;
             else if(command == "alpha")       s >> conf.alpha;
             else if(command == "randomRange") s >> conf.randomRange;
             else if(command == "seed")        s >> conf.seed;
@@ -122,7 +123,16 @@ std::istream& operator>>(std::istream& o, vector<Hyperconfiguration>& hyperparam
 
 class Validation {
 public:
-    typedef tuple<NeuralNetwork, Hyperconfiguration, size_t, double, vector<vector<pair<double, double>>>> ValidationResults;
+    struct ValidationStatus {
+        Hyperconfiguration configuration;
+        size_t epoch                         = 0;
+        double trainingError                 = INFINITY;
+        double validationError               = INFINITY;
+        size_t trainingClassificationError   = (size_t)-1;
+        size_t validationClassificationError = (size_t)-1;
+    };
+
+    typedef tuple<ValidationStatus, vector<vector<pair<double, double>>>> ValidationResults;
 
     static ValidationResults externalValidation(Configuration const& c, vector<Hyperconfiguration> const& hyperchoices, dataset training) {
         dataset validation;
@@ -155,19 +165,18 @@ public:
              << ", training size: "   << training.size()
              << ", validation size: " << validation.size() << endl;
 
-        Hyperconfiguration absoluteBestConfiguration;
-        double absoluteBestValidationError = INFINITY;
-        NeuralNetwork bestNN;
-        size_t absoluteBestEpoch = 0;
+        ValidationStatus absoluteBest;
 
         for(auto h : hyperchoices) {
             size_t unluckyEpochs = 0;
-            size_t epoch = 0;
-            size_t bestEpoch = 0;
-            double bestValidationError = INFINITY;
+            size_t epoch         = 0;
+
+            ValidationStatus bestStatus;
+
             vector<pair<double, double>> validationGraph;
+
             cerr << "Evaluating " << h << endl;
-            auto nn = NeuralNetwork(h.topology, h.randomRange, h.seed != DEFAULT_SEED ? h.seed : h.seed);
+            auto nn = NeuralNetwork(h.topology, h.randomRange, h.seed != DEFAULT_SEED ? h.seed : c.seed != DEFAULT_SEED ? c.seed : DEFAULT_SEED);
 
             if(!nn.compatible(training)) {
                 cerr << "Topology in hyperconfigurations incompatible with training set, received: ("  << training[0].first.size() << "->" << training[0].second.size() << "), expected (" << nn.inputSize() << "->" << nn.outputSize() << ")." << endl;
@@ -181,39 +190,56 @@ public:
             do {
                 epoch++;
                 nn.batchLearning(training, h.eta, h.lambda, h.alpha);
-                auto trainingError   = c.isClassification ? nn.computeClassificationError(training)   : nn.computeMeanSquaredError(training);
-                auto validationError = c.isClassification ? nn.computeClassificationError(validation) : nn.computeMeanSquaredError(validation);
 
-                if(validationError < bestValidationError) {
-                    bestValidationError = validationError;
-                    bestEpoch = epoch;
+                ValidationStatus status {
+                    .configuration                 = h,
+                    .epoch                         = epoch,
+                    .trainingError                 = nn.computeMeanSquaredError(training),
+                    .validationError               = nn.computeMeanSquaredError(validation),
+                    .trainingClassificationError   = !c.isClassification ? 0 : nn.computeClassificationError(training),
+                    .validationClassificationError = !c.isClassification ? 0 : nn.computeClassificationError(validation)
+                };
+
+                if(status.validationError < bestStatus.validationError
+                   && abs(status.validationError - bestStatus.validationError)
+                    > c.validationPercentageDecreaseEpsilon * status.validationError) {
+                    bestStatus = status;
                     unluckyEpochs = 0;
                 } else
                     unluckyEpochs++;
-                validationGraph.emplace_back(trainingError, validationError);
 
-                if(epoch % 10 == 0)
-                    cerr << " T="  << left << setw(std::numeric_limits<double>::digits10) << trainingError
-                         << " V="  << left << setw(std::numeric_limits<double>::digits10) << validationError
-                         << " E="  << epoch
-                         << endl;
+                validationGraph.emplace_back(status.trainingError, status.validationError);
+
             } while(unluckyEpochs < c.maxUnluckyEpochs);
-            if(bestValidationError < absoluteBestValidationError) {
-                bestNN                      = nn;
-                absoluteBestConfiguration   = h;
-                absoluteBestEpoch           = bestEpoch;
-                absoluteBestValidationError = bestValidationError;
-            }
+
+            if(bestStatus.validationError < absoluteBest.validationError)
+                absoluteBest = bestStatus;
+
             resultHistory.push_back(validationGraph);
         }
-        return make_tuple(bestNN, absoluteBestConfiguration, absoluteBestEpoch, absoluteBestValidationError, resultHistory);
+        return make_tuple(absoluteBest, resultHistory);
     }
 };
+
+std::ostream& operator<<(std::ostream& o, Validation::ValidationStatus const& s) {
+    o << "{";
+    o << "config="  << s.configuration << "," << endl;
+    o << "epochs="  << s.epoch << ",";
+    o << "T="       << s.trainingError << ",";
+    o << "V="       << s.validationError;
+    if(s.trainingClassificationError != -1) {
+        o << ",";
+        o << "Tclass="  << s.trainingClassificationError << ",";
+        o << "Vclass="  << s.validationClassificationError;
+    }
+    o << "}";
+    return o;
+}
 
 class Control {
 public:
     static void start(Configuration const& config, vector<Hyperconfiguration> const& hyperparameters, dataset const& data) {
-        Validation::ValidationResults results;
+        tuple<Validation::ValidationStatus, vector<vector<pair<double, double>>>> results;
         switch(config.validationType) {
             case HOLDOUT: {
                 results = Validation::holdout(config, hyperparameters, data);
@@ -224,20 +250,8 @@ public:
                 break;
             }
         }
-        cerr << "Absolute best after " << get<2>(results)
-            << " epochs, V="           << get<3>(results)
-            << ": " << endl;
-        cerr << get<1>(results) << endl;
+        cerr << "Absolute best" << endl;
         cerr << get<0>(results);
-
-        //size_t i = 0;
-        //for(auto const& g : result.second) {
-        //    cerr << i << " " << g.size() << endl;
-        //    for(auto const& t : g)
-        //        cerr << t.first << ", " << t.second << endl;
-        //}
-        //cerr << "---" << endl;
-        //cerr << result.first << endl;
     }
 };
 
