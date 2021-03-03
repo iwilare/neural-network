@@ -13,7 +13,7 @@ void oneOfK(size_t k) {
     size_t v; // [1, k]
     cin >> v;
     for(size_t i = 1; i <= k; i++)
-        cout << (i == v ? 1 : 0) << " ";
+        cout << (i == v ? 1 : -1) << " ";
 }
 
 int main(int argc, char **argv) {

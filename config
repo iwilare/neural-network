@@ -1,0 +1,6 @@
+validationType         HOLDOUT
+externalValidationFile monks-data/monks-1.test-data
+maxUnluckyEpochs       20
+isClassification       1
+seed                   0
+validationPercentageDecreaseEpsilon 0.005
